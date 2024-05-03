@@ -11,11 +11,15 @@ learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_emb = 32
+n_layer = 1
+n_head = 4
+dropout = 0.1
 #---------------------------
 
 torch.manual_seed(1337)
 
 # get input
+# !wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 with open('input.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
@@ -67,6 +71,9 @@ class Head(nn.Module):
         self.query = nn.Linear(n_emb, head_size, bias=False)
         self.value = nn.Linear(n_emb, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
+
+        self.head_size = head_size
 
     def forward(self, x):
         B,T,C = x.shape
@@ -74,9 +81,10 @@ class Head(nn.Module):
         q = self.query(x)
 
         # compute attention scores
-        wei = q @ k.transpose(-2, -1) * C**-0.5
+        wei = q @ k.transpose(-2, -1) * self.head_size**-0.5
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1)
+        wei = self.dropout(wei)
 
         # perform the weighted aggregation of the values
         v = self.value(x)
@@ -89,16 +97,25 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_emb, n_emb)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.dropout(self.proj(out))
+        return out
 
 # feed forward net
 class FeedForward(nn.Module):
 
     def __init__(self, n_emb):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(n_emb, n_emb), nn.ReLU())
+        self.net = nn.Sequential(
+            nn.Linear(n_emb, n_emb*4),
+            nn.ReLU(),
+            nn.Linear(n_emb*4, n_emb),
+            nn.Dropout(dropout)
+        )
 
     def forward(self, x):
         return self.net(x)
@@ -111,9 +128,13 @@ class Block(nn.Module):
         head_size = n_emb // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ffwd = FeedForward(n_emb)
+        self.ln1 = nn.LayerNorm(n_emb)
+        self.ln2 = nn.LayerNorm(n_emb)
 
     def forward(self, x):
-        return self.ffwd(self.sa(x))
+        x = x + self.sa(self.ln1(x)) # deviating from original paper cause better do do this pre-layer norm thing
+        x = x + self.ffwd(self.ln2(x))
+        return x
 
 # super simple bigram model
 class BigramLanguageModel(nn.Module):
@@ -123,11 +144,8 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_emb)
         self.position_embedding_table = nn.Embedding(block_size, n_emb)
-        self.blocks = nn.Sequential(
-            Block(n_emb, 4),
-            Block(n_emb, 4),
-            Block(n_emb, 4)
-        )
+        self.blocks = nn.Sequential(*[Block(n_emb, n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_emb)
         self.lm_head = nn.Linear(n_emb, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -138,6 +156,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T, C)
         x = tok_emb + pos_emb
         x = self.blocks(x)
+        x = self.ln_f(x)
         logits = self.lm_head(x) # (B, T, vocab_size)
 
         if targets is None:
@@ -188,5 +207,8 @@ for iter in range(max_iters):
     optimizer.step()
 
 # generate from the model
+# model.load_state_dict(torch.load('./bestSavedModel'))
+
+torch.save(model.state_dict(), './bestSavedModel')
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
