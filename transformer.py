@@ -3,17 +3,30 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 # hyperparameters
-batch_size = 32
-block_size = 8
+# ---------testing params
+# batch_size = 32
+# block_size = 8
+# max_iters = 5000
+# eval_interval = 500
+# learning_rate = 1e-3
+# device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# eval_iters = 200
+# n_emb = 32
+# n_layer = 1
+# n_head = 4
+# dropout = 0.1
+# ----------actual training params
+batch_size = 64
+block_size = 256
 max_iters = 5000
 eval_interval = 500
-learning_rate = 1e-3
+learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-n_emb = 32
-n_layer = 1
-n_head = 4
-dropout = 0.1
+n_emb = 300
+n_layer = 5
+n_head = 5
+dropout = 0.2
 #---------------------------
 
 torch.manual_seed(1337)
@@ -48,8 +61,12 @@ def get_batch(split):
     x, y = x.to(device), y.to(device)
     return x, y
 
+bestModelIter = 0
+bestModelValLoss = 10
+
 @torch.no_grad()
-def estimate_loss():
+def estimate_loss(iter):
+    global bestModelValLoss, bestModelIter
     out = {}
     model.eval()
     for split in ['train', 'val']:
@@ -59,6 +76,10 @@ def estimate_loss():
             logits, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
+    if bestModelValLoss > out['val'].item():
+        bestModelValLoss = out['val'].item()
+        bestModelIter = iter
+        torch.save(model.state_dict(), './bestSavedModel')
     model.train()
     return out
 
@@ -187,14 +208,17 @@ class BigramLanguageModel(nn.Module):
 model = BigramLanguageModel()
 m = model.to(device)
 
+print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
+
 # create a PyTorch optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-for iter in range(max_iters):
+for iter in range(max_iters + 1):
 
     # every once in a while evaluate the loss on train and val sets
     if iter % eval_interval == 0:
-        losses = estimate_loss()
+        print("hello")
+        losses = estimate_loss(iter)
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
     # sample a batch of data
@@ -207,8 +231,8 @@ for iter in range(max_iters):
     optimizer.step()
 
 # generate from the model
-# model.load_state_dict(torch.load('./bestSavedModel'))
-
-torch.save(model.state_dict(), './bestSavedModel')
+print("about to generate")
+model.load_state_dict(torch.load('./bestSavedModel'))
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
+print(f"best model at iteration {bestModelIter} with validation loss {bestModelValLoss}")
 print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
